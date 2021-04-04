@@ -1,0 +1,168 @@
+---
+- name: Install services java11 Jdk, Postgresql 13.2, Zabbix-agent.
+  hosts: PROD_SERVERS
+  become: yes
+
+  vars:
+    #Variables for install Java
+    oracle_java_apt_repository: ppa:linuxuprising/java
+    oracle_java_deb_package: oracle-java11-installer-local
+    oracle_java_license_version: 'shared/accepted-oracle-license-v1-2'
+    oracle_java_cache_folder: /var/cache/oracle-jdk11-installer-local/
+    oracle_java_jdk: /home/ubuntu/jdk-11.0.10_linux-x64_bin.tar.gz
+    #Variables for install Postgresql
+    postgresql_apt_repository: "deb http://apt.postgresql.org/pub/repos/apt/ {{ ansible_distribution_release }}-pgdg main"
+    postgre_url_repo_key: https://www.postgresql.org/media/keys/ACCC4CF8.asc
+    postgresql_database_name: artemida
+    postgresql_user_name: artemida
+    postgresql_user_password: "1234"
+    #Variables for zabbix-agent
+    zabbix_apt_repository: https://repo.zabbix.com/zabbix/5.2/ubuntu/pool/main/z/zabbix-release/zabbix-release_5.2-1+ubuntu20.04_all.deb
+    zabbix_deb_package: zabbix-release_5.2-1+ubuntu20.04_all.deb
+    zabbix_source_folder: /home/ubuntu
+    zabbix_dest_folder: /etc/zabbix
+    #Variable for user
+    user_name: dev
+    user_password: "1234"
+    user_group_name: developers
+
+
+  tasks:
+
+    - name: install oracle java jdk 11  using ppa
+      block:
+        - name: Create cache folder
+          ansible.builtin.file:
+            path: "{{ oracle_java_cache_folder }}"
+            state: directory
+            mode: '0755'
+
+        - name: Copy jdk-11.0.10_linux-x64_bin.tar.gz to remote server
+          copy:
+            src: "{{ oracle_java_jdk }}"
+            dest: "{{ oracle_java_cache_folder }}"
+            mode: 0644
+
+        - name: add perository
+          ansible.builtin.apt_repository:
+            repo: "{{ oracle_java_apt_repository }}"
+            update_cache: yes
+            state: present
+
+        - name: Accept oracle license
+          ansible.builtin.debconf:
+            name: "{{ oracle_java_deb_package }}"
+            question: "{{ oracle_java_license_version }}"
+            value: 'true'
+            vtype: select
+
+
+        - name: Install Java
+          apt:
+            name: "{{ oracle_java_deb_package }}"
+            state: latest
+            cache_valid_time: 3600
+            update_cache: yes
+            force: yes
+          register: results
+
+        - name: Show installation result
+          debug:
+            var: results
+      when: ansible_distribution_release == 'focal'
+
+    - name: Installing postgresql
+      block:
+        - name: Import the repository signing key
+          apt_key:
+            url: "{{ postgre_url_repo_key }}"
+            state: present
+
+        - name: add repository pgdg
+          apt_repository:
+            repo: "{{ postgresql_apt_repository }}"
+            update_cache: yes
+
+        - name: Install PostgreSQL
+          apt:
+            name: postgresql
+            state: latest
+          register: postgresql_result
+          until: postgresql_result is succeeded
+          retries: 5
+          delay: 5
+
+        - name: Show installation result
+          debug:
+            var: postgresql_result
+
+      when: ansible_distribution_release == 'focal'
+
+
+    - name: Installing zabbix-agent
+      block:
+        - name: Install Zabbix repository
+          get_url:
+            url: "{{ zabbix_apt_repository }}"
+            dest: "/tmp/{{ zabbix_deb_package }}"
+
+        - name: install zabbix deb
+          apt: deb="/tmp/{{ zabbix_deb_package }}"
+
+        - name: install zabbix-agent 5.2
+          apt:
+            name: zabbix-agent
+            state: latest
+            update_cache: yes
+          register: zabbix_agent_result
+
+        - name: Configurate zabbix-agent for zbx.ololo.club
+          template: src={{ zabbix_source_folder }}/zabbix_agentd.j2 dest={{ zabbix_dest_folder }}/zabbix_agentd.conf mode=0555
+
+        - name: Started and Enable zabbix-agent
+          systemd:
+            name: zabbix-agent
+            enabled: yes
+
+        - name: Show installation result
+          debug:
+            var: zabbix_agent_result
+
+      when: ansible_distribution_release == 'focal'
+
+    - name: Create user
+      block:
+        - name: create group
+          group:
+            name: "{{user_group_name}}"
+            state: present
+
+        - name: create user
+          user:
+            name: "{{ user_name }}"
+            password: "{{ user_password | password_hash('sha512','A512') }}"
+            shell: /bin/bash
+            groups: "{{user_group_name}}"
+
+    - name: Create DB and Users Postgre
+      block:
+        - name: install python3-psycopg2 for connect to postgresql
+          apt:
+           name: python3-psycopg2
+           state: present
+           update_cache: yes
+
+        - name:
+          postgresql_db:
+            name: "{{ postgresql_user_name }}"
+            state: present
+          become: true
+          become_user: postgres
+
+        - name: create user and give priv
+          postgresql_user:
+            db: "{{ postgresql_database_name }}"
+            name: "{{ postgresql_user_name }}"
+            password: "{{ postgresql_user_password }}"
+            priv: ALL
+          become_user: postgres
